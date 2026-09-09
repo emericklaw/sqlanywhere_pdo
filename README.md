@@ -4,7 +4,7 @@ PDO-compatible userland wrapper around the procedural `ext-sqlanywhere` extensio
 
 ## Requirements
 
-- PHP >= 8.3
+- PHP >= 8.1
 - `ext-sqlanywhere` built and loaded (see `../lib_sqlanywhere-php-module/BUILD.md`)
 
 ## Usage
