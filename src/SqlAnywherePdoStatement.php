@@ -46,6 +46,14 @@ class SqlAnywherePdoStatement extends PDOStatement
 
     private bool $preparedResultBound = false;
 
+    /**
+     * Set when ensurePreparedResultBound() has already consumed the first
+     * row via sasql_stmt_fetch() to force SQL Anywhere to expose field
+     * metadata (see its doc comment). The next fetch() call must return
+     * this buffered row instead of advancing the cursor again.
+     */
+    private bool $hasPrefetchedRow = false;
+
     private int $columnCount = 0;
 
     /** @var list<string> */
@@ -150,6 +158,7 @@ class SqlAnywherePdoStatement extends PDOStatement
         // at this point, unlike mid-fetch.
         $this->resultMetadataResource = null;
         $this->preparedResultBound = false;
+        $this->hasPrefetchedRow = false;
         $this->fetchBuffer = [];
         $this->externalColumnBindings = [];
 
@@ -440,11 +449,6 @@ class SqlAnywherePdoStatement extends PDOStatement
         }
 
         $this->columnCount = (int) @sasql_stmt_field_count($this->stmt);
-
-        // Kept on $this (not a local var) — letting this resource's
-        // refcount hit zero corrupts the statement's internal result.
-        $this->resultMetadataResource = @sasql_stmt_result_metadata($this->stmt);
-        $this->columnNames = $this->resolveColumnNames();
         $this->fetchBuffer = array_fill(0, max($this->columnCount, 0), null);
 
         if ($this->columnCount > 0) {
@@ -454,7 +458,20 @@ class SqlAnywherePdoStatement extends PDOStatement
             }
 
             @call_user_func_array('sasql_stmt_bind_result', $refs);
+
+            // SQL Anywhere doesn't expose field metadata (names) via
+            // sasql_stmt_result_metadata()/sasql_fetch_field() until at
+            // least one row has been fetched — confirmed empirically for
+            // TOP-limited statements. The buffer is already bound above,
+            // so this fetch populates it; fetchPreparedRow() returns this
+            // buffered row on its first call instead of fetching again.
+            $this->hasPrefetchedRow = (bool) @sasql_stmt_fetch($this->stmt);
         }
+
+        // Kept on $this (not a local var) — letting this resource's
+        // refcount hit zero corrupts the statement's internal result.
+        $this->resultMetadataResource = @sasql_stmt_result_metadata($this->stmt);
+        $this->columnNames = $this->resolveColumnNames();
 
         $this->preparedResultBound = true;
     }
@@ -518,10 +535,14 @@ class SqlAnywherePdoStatement extends PDOStatement
     {
         $this->ensurePreparedResultBound();
 
-        $fetched = @sasql_stmt_fetch($this->stmt);
+        if ($this->hasPrefetchedRow) {
+            $this->hasPrefetchedRow = false;
+        } else {
+            $fetched = @sasql_stmt_fetch($this->stmt);
 
-        if ($fetched === false || $fetched === null) {
-            return null;
+            if ($fetched === false || $fetched === null) {
+                return null;
+            }
         }
 
         $row = $this->fetchBuffer;
