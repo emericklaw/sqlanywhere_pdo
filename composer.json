@@ -2,6 +2,7 @@
     "name": "emericklaw/sqlanywhere-pdo",
     "description": "PDO-compatible userland wrapper around the ext-sqlanywhere (sasql_*) procedural extension for SAP SQL Anywhere",
     "type": "library",
+    "version": "1.0.0",
     "license": "MIT",
     "require": {
         "php": ">=8.1",
