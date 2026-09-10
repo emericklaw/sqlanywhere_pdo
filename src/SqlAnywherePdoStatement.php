@@ -77,6 +77,18 @@ class SqlAnywherePdoStatement extends PDOStatement
     private mixed $resultMetadataResource = null;
 
     /**
+     * Whether this statement's SQL text is DML/DDL (no result set expected),
+     * determined once from the SQL text itself rather than by querying
+     * sasql_stmt_field_count() at runtime — that count is unreliable
+     * before the first row is fetched (confirmed empirically: it reports
+     * 0 even for a genuine SELECT, immediately after execute()), so using
+     * it to decide whether to auto-commit caused a premature commit on an
+     * open SELECT cursor, which itself triggered the same class of
+     * deadlock this was meant to fix. A static, always-correct signal.
+     */
+    private readonly bool $isWriteStatement;
+
+    /**
      * @param list<string|int> $paramOrder
      * @param resource|null $result
      * @param resource|null $stmt
@@ -86,12 +98,26 @@ class SqlAnywherePdoStatement extends PDOStatement
         mixed $result = null,
         mixed $stmt = null,
         array $paramOrder = [],
+        ?string $sql = null,
     ) {
         $this->result = $result;
         $this->stmt = $stmt;
         $this->isPrepared = $stmt !== null;
         $this->paramOrder = $paramOrder;
         $this->fetchMode = $pdo->getDefaultFetchMode();
+        $this->isWriteStatement = self::sqlIsWriteStatement($sql);
+    }
+
+    private static function sqlIsWriteStatement(?string $sql): bool
+    {
+        if ($sql === null) {
+            return false;
+        }
+
+        return (bool) preg_match(
+            '/^\s*(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE)\b/i',
+            $sql,
+        );
     }
 
     public function bindParam(string|int $param, mixed &$var, int $type = PDO::PARAM_STR, int $maxLength = 0, mixed $driverOptions = null): bool
@@ -150,6 +176,22 @@ class SqlAnywherePdoStatement extends PDOStatement
 
         if (@sasql_stmt_execute($this->stmt) === false) {
             return $this->pdo->fail($this->statementErrorInfo());
+        }
+
+        // sasql_stmt_execute() never commits, unlike the non-prepared
+        // sasql_query() path (which calls sqlany_commit() internally when
+        // autocommit is on) — confirmed by reading sqlanywhere.c, and by
+        // reproducing a live deadlock: every prepared UPDATE/INSERT/DELETE
+        // left the connection with an uncommitted transaction, and the
+        // NEXT sasql_prepare() on that connection hung inside the closed
+        // source client library's own sqlany_prepare() call. Since this
+        // wrapper is the prepared-statement-only path PDO callers (and
+        // Laravel) always use, autocommit has to be emulated here instead.
+        // Gated on $isWriteStatement (determined statically from the SQL
+        // text — see its declaration) rather than a runtime result-set
+        // check, which is unreliable before the first fetch.
+        if ($this->isWriteStatement && !$this->pdo->inTransaction()) {
+            @sasql_commit($this->pdo->getConnectionResource());
         }
 
         // sasql_stmt_execute() already closed/replaced the statement's

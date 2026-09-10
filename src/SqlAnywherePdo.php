@@ -93,7 +93,7 @@ class SqlAnywherePdo extends PDO
             return $this->fail($this->connectionErrorInfo());
         }
 
-        return new SqlAnywherePdoStatement($this, stmt: $stmt, paramOrder: $translated->paramOrder);
+        return new SqlAnywherePdoStatement($this, stmt: $stmt, paramOrder: $translated->paramOrder, sql: $query);
     }
 
     public function exec(string $statement): int|false
