@@ -43,4 +43,25 @@ final class ConnectionStringBuilderTest extends TestCase
 
         self::assertSame('uid=fromdsn;SERVER=x', $result);
     }
+
+    public function test_brace_quoted_value_containing_semicolon_is_preserved(): void
+    {
+        $result = ConnectionStringBuilder::build('SERVER=x;PWD={p@ss;word};DBN=test', null, null);
+
+        self::assertSame('SERVER=x;PWD={p@ss;word};DBN=test', $result);
+    }
+
+    public function test_escaped_closing_brace_inside_quoted_value_is_preserved(): void
+    {
+        $result = ConnectionStringBuilder::build('SERVER=x;PWD={p}}ss}', null, null);
+
+        self::assertSame('SERVER=x;PWD={p}}ss}', $result);
+    }
+
+    public function test_password_containing_semicolon_from_constructor_is_brace_quoted(): void
+    {
+        $result = ConnectionStringBuilder::build('SERVER=x', null, 'p;ss');
+
+        self::assertSame('SERVER=x;PWD={p;ss}', $result);
+    }
 }

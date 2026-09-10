@@ -223,6 +223,12 @@ class SqlAnywherePdoStatement extends PDOStatement
             return $this->buildFetchResult($row, $this->columnNames, $mode);
         }
 
+        if ($mode === PDO::FETCH_CLASS) {
+            $assoc = @sasql_fetch_assoc($this->result);
+
+            return $assoc === false ? false : $this->hydrateClass($assoc, $this->fetchModeArgs);
+        }
+
         return match ($mode) {
             PDO::FETCH_ASSOC => @sasql_fetch_assoc($this->result),
             PDO::FETCH_NUM => @sasql_fetch_row($this->result),
@@ -234,9 +240,23 @@ class SqlAnywherePdoStatement extends PDOStatement
     public function fetchAll(int $mode = PDO::FETCH_DEFAULT, mixed ...$args): array
     {
         $rows = [];
+        $resolvedMode = $mode === PDO::FETCH_DEFAULT ? $this->fetchMode : $mode;
+
+        // fetchAll(PDO::FETCH_CLASS, SomeClass::class, $ctorArgs) passes the
+        // class per-call rather than via a prior setFetchMode() — honour
+        // that by temporarily swapping it in for this call only.
+        $previousArgs = null;
+        if ($resolvedMode === PDO::FETCH_CLASS && $args !== []) {
+            $previousArgs = $this->fetchModeArgs;
+            $this->fetchModeArgs = $args;
+        }
 
         while (($row = $this->fetch($mode)) !== false) {
             $rows[] = $row;
+        }
+
+        if ($previousArgs !== null) {
+            $this->fetchModeArgs = $previousArgs;
         }
 
         return $rows;
@@ -629,9 +649,39 @@ class SqlAnywherePdoStatement extends PDOStatement
         return match ($mode) {
             PDO::FETCH_NUM => $row,
             PDO::FETCH_ASSOC => $this->combineAssoc($columnNames, $row),
-            PDO::FETCH_OBJ, PDO::FETCH_CLASS => (object) $this->combineAssoc($columnNames, $row),
+            PDO::FETCH_OBJ => (object) $this->combineAssoc($columnNames, $row),
+            PDO::FETCH_CLASS => $this->hydrateClass($this->combineAssoc($columnNames, $row), $this->fetchModeArgs),
             default => $this->combineAssoc($columnNames, $row) + $row,
         };
+    }
+
+    /**
+     * PDO::FETCH_CLASS hydration: $classArgs is [className, constructorArgs]
+     * as stored by setFetchMode(PDO::FETCH_CLASS, $class, $ctorArgs) — this
+     * used to be captured and never read anywhere, silently falling back to
+     * plain stdClass for every FETCH_CLASS caller regardless of the class
+     * they asked for.
+     *
+     * @param array<string, mixed> $assoc
+     * @param list<mixed> $classArgs
+     */
+    private function hydrateClass(array $assoc, array $classArgs): object
+    {
+        $class = $classArgs[0] ?? 'stdClass';
+        $ctorArgs = $classArgs[1] ?? [];
+
+        if (!is_string($class) || $class === '' || !class_exists($class)) {
+            $class = 'stdClass';
+            $ctorArgs = [];
+        }
+
+        $object = $ctorArgs !== [] ? new $class(...$ctorArgs) : new $class();
+
+        foreach ($assoc as $property => $value) {
+            $object->$property = $value;
+        }
+
+        return $object;
     }
 
     /**

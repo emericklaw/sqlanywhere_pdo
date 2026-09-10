@@ -90,4 +90,43 @@ final class PreparedStatementTest extends TestCase
 
         self::assertSame(5, (int) $stmt->fetchColumn());
     }
+
+    /**
+     * Regression test: a named placeholder reused more than once in the
+     * SQL text (e.g. a report query referencing :dateFrom several times)
+     * occupies one positional slot per occurrence — a single bindValue()
+     * call by name must fill every occurrence, not just the first, or
+     * execute() fails with "parameter N was not bound".
+     */
+    public function test_execute_binds_a_repeated_named_placeholder_to_every_occurrence(): void
+    {
+        $pdo = $this->requireLiveConnection();
+
+        $stmt = $pdo->prepare('SELECT :a + :a + :a');
+        $stmt->execute(['a' => 2]);
+
+        self::assertSame(6, (int) $stmt->fetchColumn());
+    }
+
+    public function test_fetch_class_hydrates_the_requested_class(): void
+    {
+        $pdo = $this->requireLiveConnection();
+
+        $stmt = $pdo->prepare('SELECT 1 AS one, 2 AS two');
+        $stmt->execute();
+        $stmt->setFetchMode(PDO::FETCH_CLASS, PreparedStatementTestRow::class);
+
+        $row = $stmt->fetch();
+
+        self::assertInstanceOf(PreparedStatementTestRow::class, $row);
+        self::assertSame(1, $row->one);
+        self::assertSame(2, $row->two);
+    }
+}
+
+final class PreparedStatementTestRow
+{
+    public int $one;
+
+    public int $two;
 }
