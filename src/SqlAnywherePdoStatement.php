@@ -122,26 +122,18 @@ class SqlAnywherePdoStatement extends PDOStatement
 
     public function bindParam(string|int $param, mixed &$var, int $type = PDO::PARAM_STR, int $maxLength = 0, mixed $driverOptions = null): bool
     {
-        $slot = $this->resolveSlot($param);
-
-        if ($slot === null) {
-            return true;
+        foreach ($this->resolveSlots($param) as $slot) {
+            $this->boundParams[$slot] = ['ref' => &$var, 'type' => $type, 'isRef' => true];
         }
-
-        $this->boundParams[$slot] = ['ref' => &$var, 'type' => $type, 'isRef' => true];
 
         return true;
     }
 
     public function bindValue(string|int $param, mixed $value, int $type = PDO::PARAM_STR): bool
     {
-        $slot = $this->resolveSlot($param);
-
-        if ($slot === null) {
-            return true;
+        foreach ($this->resolveSlots($param) as $slot) {
+            $this->boundParams[$slot] = ['value' => $value, 'type' => $type, 'isRef' => false];
         }
-
-        $this->boundParams[$slot] = ['value' => $value, 'type' => $type, 'isRef' => false];
 
         return true;
     }
@@ -405,10 +397,10 @@ class SqlAnywherePdoStatement extends PDOStatement
     }
 
     /**
-     * Returns null for a parameter name/position that doesn't correspond
-     * to any placeholder actually present in the prepared SQL, rather
-     * than throwing — callers (bindParam()/bindValue()) treat that as a
-     * harmless no-op. Real PDO drivers are commonly this lenient too
+     * Returns an empty array for a parameter name/position that doesn't
+     * correspond to any placeholder actually present in the prepared SQL,
+     * rather than throwing — callers (bindParam()/bindValue()) treat that
+     * as a harmless no-op. Real PDO drivers are commonly this lenient too
      * (e.g. PDO_MYSQL's default emulated-prepare mode silently ignores
      * bindings with no matching placeholder), and Laravel application
      * code in the wild relies on that: it's common to build up a full
@@ -416,23 +408,34 @@ class SqlAnywherePdoStatement extends PDOStatement
      * unused straight through to execute(). bindBufferedParamsToStatement()
      * is the real safety net — it separately requires every placeholder
      * that IS in the SQL to have been bound before execute() runs.
+     *
+     * A named placeholder used more than once in the SQL (e.g.
+     * `:x` appearing three times) occupies one positional '?' slot per
+     * occurrence in $paramOrder (see PlaceholderTranslator), since
+     * sasql_stmt_bind_param() only understands flat positional binding.
+     * A single bindParam()/bindValue() call by name must therefore fill
+     * every occurrence, not just the first — otherwise the later slots
+     * are left unbound and execute() fails with "parameter N was not
+     * bound" (confirmed against a live report query reusing the same
+     * named date-range placeholders throughout).
+     *
+     * @return list<int>
      */
-    private function resolveSlot(string|int $param): ?int
+    private function resolveSlots(string|int $param): array
     {
         if (is_int($param)) {
             $zeroBased = $param - 1;
 
             if ($this->paramOrder !== [] && !array_key_exists($zeroBased, $this->paramOrder)) {
-                return null;
+                return [];
             }
 
-            return $zeroBased;
+            return [$zeroBased];
         }
 
         $name = strtolower(ltrim($param, ':'));
-        $index = array_search($name, $this->paramOrder, true);
 
-        return $index === false ? null : $index;
+        return array_keys($this->paramOrder, $name, true);
     }
 
     private function bindBufferedParamsToStatement(): void
