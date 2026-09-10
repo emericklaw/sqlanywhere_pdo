@@ -107,8 +107,23 @@ final class ConnectionStringBuilder
                     $i++;
                 }
             } else {
+                // Unbraced values can themselves be a paren-grouped
+                // descriptor — LINKS=TCPIP(host=h;port=2638) is the
+                // documented working form for network host/port (see
+                // SqlAnywhereConnector::buildConnectionString()) — so a
+                // ';' inside an open '(' must not end the value here,
+                // matching formatValue()'s matching leniency below.
                 $valueStart = $i;
-                while ($i < $length && $dsn[$i] !== ';') {
+                $parenDepth = 0;
+                while ($i < $length) {
+                    $ch = $dsn[$i];
+                    if ($ch === '(') {
+                        $parenDepth++;
+                    } elseif ($ch === ')') {
+                        $parenDepth = max(0, $parenDepth - 1);
+                    } elseif ($ch === ';' && $parenDepth === 0) {
+                        break;
+                    }
                     $i++;
                 }
                 $value = trim(substr($dsn, $valueStart, $i - $valueStart));
@@ -124,12 +139,41 @@ final class ConnectionStringBuilder
      * Re-quotes a value with braces if it contains a character that would
      * otherwise be misread as a segment/key boundary on the next parse
      * (';' or '=') or that would break the brace-quoting convention itself
-     * ('{' or '}').
+     * ('{' or '}'). A ';' or '=' nested inside a balanced '(...)' — as in
+     * LINKS=TCPIP(host=h;port=2638), the documented working form for
+     * network host/port — does NOT need quoting: parsePairs() already
+     * treats those as part of one value, matching this. Quoting it anyway
+     * would turn a confirmed-working live connection string into an
+     * unverified one, so this only quotes what's actually ambiguous.
      */
     private static function formatValue(string $value): string
     {
-        if (!str_contains($value, ';') && !str_contains($value, '=')
-            && !str_contains($value, '{') && !str_contains($value, '}')) {
+        if (str_contains($value, '{') || str_contains($value, '}')) {
+            return '{' . str_replace('}', '}}', $value) . '}';
+        }
+
+        $length = strlen($value);
+        $parenDepth = 0;
+        $needsQuoting = false;
+
+        for ($i = 0; $i < $length; $i++) {
+            $ch = $value[$i];
+            if ($ch === '(') {
+                $parenDepth++;
+            } elseif ($ch === ')') {
+                $parenDepth = max(0, $parenDepth - 1);
+            } elseif (($ch === ';' || $ch === '=') && $parenDepth === 0) {
+                $needsQuoting = true;
+                break;
+            }
+        }
+
+        if ($parenDepth !== 0) {
+            // Unbalanced parens — not a clean descriptor, quote defensively.
+            $needsQuoting = true;
+        }
+
+        if (!$needsQuoting) {
             return $value;
         }
 

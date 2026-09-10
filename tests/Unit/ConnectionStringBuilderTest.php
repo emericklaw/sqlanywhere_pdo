@@ -64,4 +64,24 @@ final class ConnectionStringBuilderTest extends TestCase
 
         self::assertSame('SERVER=x;PWD={p;ss}', $result);
     }
+
+    /**
+     * Regression test: LINKS=TCPIP(host=h;port=2638) is the documented
+     * working DSN form for network host/port (SqlAnywhereConnector's own
+     * example). The ';' and '=' inside the parens must not be mistaken
+     * for a segment/key boundary on parse, and must NOT come back
+     * brace-quoted on output — braced was never confirmed against a live
+     * server, and a prior version of this fix wrongly quoted the
+     * paren-truncated fragment, producing "LINKS={TCPIP(host=h}" plus a
+     * bogus top-level "port" pair, which SQL Anywhere rejected with
+     * "Trying to add unknown port ''".
+     */
+    public function test_paren_grouped_links_value_with_nested_semicolon_and_equals_round_trips_unquoted(): void
+    {
+        $dsn = 'SERVER=x;DBN=test;LINKS=TCPIP(host=1.2.3.4;port=2638)';
+
+        $result = ConnectionStringBuilder::build($dsn, null, null);
+
+        self::assertSame($dsn, $result);
+    }
 }
