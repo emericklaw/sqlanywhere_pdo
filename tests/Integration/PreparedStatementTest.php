@@ -71,4 +71,23 @@ final class PreparedStatementTest extends TestCase
         self::assertSame(['n' => 1], $rows[0]);
         self::assertSame(['n' => 2], $rows[1]);
     }
+
+    /**
+     * Regression test for a real Laravel app: a bindings array commonly
+     * ends up with extra named keys that don't correspond to any
+     * placeholder actually present in the SQL (e.g. built up
+     * speculatively across several conditional branches, some of which
+     * are unused for a given report). Real PDO drivers in Laravel's
+     * typical (emulated-prepare) usage silently ignore these; this
+     * wrapper should too, rather than throwing HY093.
+     */
+    public function test_execute_ignores_bindings_with_no_matching_placeholder(): void
+    {
+        $pdo = $this->requireLiveConnection();
+
+        $stmt = $pdo->prepare('SELECT :a + :b');
+        $stmt->execute(['a' => 2, 'b' => 3, 'unused' => 'whatever']);
+
+        self::assertSame(5, (int) $stmt->fetchColumn());
+    }
 }

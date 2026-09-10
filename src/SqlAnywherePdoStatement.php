@@ -123,6 +123,11 @@ class SqlAnywherePdoStatement extends PDOStatement
     public function bindParam(string|int $param, mixed &$var, int $type = PDO::PARAM_STR, int $maxLength = 0, mixed $driverOptions = null): bool
     {
         $slot = $this->resolveSlot($param);
+
+        if ($slot === null) {
+            return true;
+        }
+
         $this->boundParams[$slot] = ['ref' => &$var, 'type' => $type, 'isRef' => true];
 
         return true;
@@ -131,6 +136,11 @@ class SqlAnywherePdoStatement extends PDOStatement
     public function bindValue(string|int $param, mixed $value, int $type = PDO::PARAM_STR): bool
     {
         $slot = $this->resolveSlot($param);
+
+        if ($slot === null) {
+            return true;
+        }
+
         $this->boundParams[$slot] = ['value' => $value, 'type' => $type, 'isRef' => false];
 
         return true;
@@ -394,13 +404,26 @@ class SqlAnywherePdoStatement extends PDOStatement
         }
     }
 
-    private function resolveSlot(string|int $param): int
+    /**
+     * Returns null for a parameter name/position that doesn't correspond
+     * to any placeholder actually present in the prepared SQL, rather
+     * than throwing — callers (bindParam()/bindValue()) treat that as a
+     * harmless no-op. Real PDO drivers are commonly this lenient too
+     * (e.g. PDO_MYSQL's default emulated-prepare mode silently ignores
+     * bindings with no matching placeholder), and Laravel application
+     * code in the wild relies on that: it's common to build up a full
+     * bindings array speculatively and pass whichever keys end up
+     * unused straight through to execute(). bindBufferedParamsToStatement()
+     * is the real safety net — it separately requires every placeholder
+     * that IS in the SQL to have been bound before execute() runs.
+     */
+    private function resolveSlot(string|int $param): ?int
     {
         if (is_int($param)) {
             $zeroBased = $param - 1;
 
             if ($this->paramOrder !== [] && !array_key_exists($zeroBased, $this->paramOrder)) {
-                throw new SqlAnywherePdoException(sprintf('SQLSTATE[HY093]: Invalid parameter number: %d', $param));
+                return null;
             }
 
             return $zeroBased;
@@ -409,11 +432,7 @@ class SqlAnywherePdoStatement extends PDOStatement
         $name = strtolower(ltrim($param, ':'));
         $index = array_search($name, $this->paramOrder, true);
 
-        if ($index === false) {
-            throw new SqlAnywherePdoException(sprintf('SQLSTATE[HY093]: Invalid parameter number: %s', $param));
-        }
-
-        return $index;
+        return $index === false ? null : $index;
     }
 
     private function bindBufferedParamsToStatement(): void
