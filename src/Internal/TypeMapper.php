@@ -13,8 +13,28 @@ use PDO;
  */
 final class TypeMapper
 {
-    public static function toSasqlTypeChar(int $pdoParamType): string
+    /**
+     * PDO has no PARAM_FLOAT constant, so a bound PHP float — whether
+     * passed explicitly via bindValue()/bindParam() with the default
+     * $type (PARAM_STR), or auto-inferred by inferParamType() below —
+     * normally resolves here as 's' (string). sasql_stmt_bind_param()
+     * then binds it as A_STRING and the C extension truncates the
+     * string to whatever buffer_size the server described for that
+     * parameter's actual (numeric) column type before sending it —
+     * corrupting the decimal value (confirmed against a live insert:
+     * a float column value got silently truncated mid-digit and the
+     * server then failed with "Cannot convert '<truncated value>' to
+     * double"). $value is passed through so a genuine PHP float can be
+     * bound as 'd' (double) instead, sidestepping the truncation
+     * entirely; a caller who explicitly needs a float sent as a literal
+     * string should cast it to string before binding.
+     */
+    public static function toSasqlTypeChar(int $pdoParamType, mixed $value = null): string
     {
+        if ($pdoParamType === PDO::PARAM_STR && is_float($value)) {
+            return 'd';
+        }
+
         return match ($pdoParamType) {
             PDO::PARAM_INT => 'i',
             PDO::PARAM_BOOL => 'i',

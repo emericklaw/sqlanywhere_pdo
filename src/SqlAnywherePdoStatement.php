@@ -476,13 +476,14 @@ class SqlAnywherePdoStatement extends PDOStatement
 
             $bound = $this->boundParams[$slot];
             $type = $bound['type'];
-            $typeChars .= TypeMapper::toSasqlTypeChar($type);
 
             $values[$slot] = match (true) {
                 TypeMapper::isLob($type) => '',
                 $bound['isRef'] => $bound['ref'],
                 default => $bound['value'],
             };
+
+            $typeChars .= TypeMapper::toSasqlTypeChar($type, $values[$slot]);
         }
 
         $callArgs = [$this->stmt, $typeChars];

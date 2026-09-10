@@ -108,6 +108,25 @@ final class PreparedStatementTest extends TestCase
         self::assertSame(6, (int) $stmt->fetchColumn());
     }
 
+    /**
+     * Regression test: a PHP float bound via execute($params) (no
+     * explicit PDO::PARAM_* type) used to be auto-inferred as
+     * PARAM_STR, sent to sasql_stmt_bind_param() as a string, and
+     * truncated by the C extension to the buffer size the server
+     * described for the target numeric column — corrupting the
+     * decimal and causing the server to reject it with
+     * "Cannot convert '<truncated value>' to double" on a real insert.
+     */
+    public function test_execute_binds_a_float_without_truncation(): void
+    {
+        $pdo = $this->requireLiveConnection();
+
+        $stmt = $pdo->prepare('SELECT CAST(:a AS DOUBLE) + CAST(:b AS DOUBLE)');
+        $stmt->execute(['a' => 0.0039529800415039, 'b' => 0.0]);
+
+        self::assertEqualsWithDelta(0.0039529800415039, (float) $stmt->fetchColumn(), 1e-15);
+    }
+
     public function test_fetch_class_hydrates_the_requested_class(): void
     {
         $pdo = $this->requireLiveConnection();
