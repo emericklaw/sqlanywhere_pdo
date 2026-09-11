@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace EmerickLaw\SqlAnywherePdo\Tests\Unit;
 
 use EmerickLaw\SqlAnywherePdo\Internal\TypeMapper;
+use EmerickLaw\SqlAnywherePdo\SqlAnywherePdoException;
 use PDO;
 use PHPUnit\Framework\TestCase;
 
@@ -48,5 +49,47 @@ final class TypeMapperTest extends TestCase
         self::assertSame(PDO::PARAM_INT, TypeMapper::inferParamType(42));
         self::assertSame(PDO::PARAM_STR, TypeMapper::inferParamType('hello'));
         self::assertSame(PDO::PARAM_STR, TypeMapper::inferParamType(3.14));
+    }
+
+    public function test_to_literal_renders_null(): void
+    {
+        self::assertSame('NULL', TypeMapper::toLiteral(PDO::PARAM_NULL, 'ignored', self::noopEscaper()));
+        self::assertSame('NULL', TypeMapper::toLiteral(PDO::PARAM_STR, null, self::noopEscaper()));
+    }
+
+    public function test_to_literal_renders_int_and_bool_bare(): void
+    {
+        self::assertSame('42', TypeMapper::toLiteral(PDO::PARAM_INT, 42, self::noopEscaper()));
+        self::assertSame('1', TypeMapper::toLiteral(PDO::PARAM_BOOL, true, self::noopEscaper()));
+        self::assertSame('0', TypeMapper::toLiteral(PDO::PARAM_BOOL, false, self::noopEscaper()));
+    }
+
+    public function test_to_literal_renders_float_as_plain_decimal(): void
+    {
+        self::assertSame('3.14', TypeMapper::toLiteral(PDO::PARAM_STR, 3.14, self::noopEscaper()));
+        self::assertSame('5', TypeMapper::toLiteral(PDO::PARAM_STR, 5.0, self::noopEscaper()));
+    }
+
+    public function test_to_literal_quotes_and_escapes_strings_via_callback(): void
+    {
+        $literal = TypeMapper::toLiteral(
+            PDO::PARAM_STR,
+            "O'Brien",
+            fn (string $s): string => str_replace("'", "''", $s),
+        );
+
+        self::assertSame("'O''Brien'", $literal);
+    }
+
+    public function test_to_literal_rejects_lob(): void
+    {
+        $this->expectException(SqlAnywherePdoException::class);
+
+        TypeMapper::toLiteral(PDO::PARAM_LOB, 'blob data', self::noopEscaper());
+    }
+
+    private static function noopEscaper(): \Closure
+    {
+        return fn (string $s): string => $s;
     }
 }

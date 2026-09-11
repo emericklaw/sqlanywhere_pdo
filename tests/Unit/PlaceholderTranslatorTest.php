@@ -97,4 +97,65 @@ final class PlaceholderTranslatorTest extends TestCase
         self::assertSame('SELECT * FROM t', $result->sql);
         self::assertSame([], $result->paramOrder);
     }
+
+    public function test_substitute_splices_literals_in_placeholder_order(): void
+    {
+        $sql = PlaceholderTranslator::substitute(
+            'SELECT * FROM t WHERE a = ? AND b = ?',
+            ["'x'", '42'],
+        );
+
+        self::assertSame("SELECT * FROM t WHERE a = 'x' AND b = 42", $sql);
+    }
+
+    public function test_substitute_handles_named_placeholders_in_source_order(): void
+    {
+        $sql = PlaceholderTranslator::substitute(
+            'SELECT * FROM t WHERE a = :foo AND b = :bar',
+            ["'x'", '42'],
+        );
+
+        self::assertSame("SELECT * FROM t WHERE a = 'x' AND b = 42", $sql);
+    }
+
+    public function test_substitute_ignores_placeholder_look_alikes_inside_literals(): void
+    {
+        $sql = PlaceholderTranslator::substitute(
+            "SELECT '?' , ':x' FROM t WHERE a = ?",
+            ['99'],
+        );
+
+        self::assertSame("SELECT '?' , ':x' FROM t WHERE a = 99", $sql);
+    }
+
+    public function test_substitute_throws_when_a_placeholder_has_no_matching_literal(): void
+    {
+        $this->expectException(SqlAnywherePdoException::class);
+
+        PlaceholderTranslator::substitute('SELECT * FROM t WHERE a = ? AND b = ?', ["'x'"]);
+    }
+
+    /**
+     * Regression test for the "Not enough values for host variables" bug:
+     * SQL Anywhere's own prepare-time parameter count doesn't recognize a
+     * '?'/':name' placeholder nested inside a subquery that's itself an
+     * argument of a CALL procedure(...) statement as a bindable host
+     * variable, even though every such placeholder is textually present
+     * and bound. Emulated prepares (the connection default — see
+     * SqlAnywherePdo::prepare()) avoid this entirely by never sending a
+     * host variable to SQL Anywhere in the first place: every bound value
+     * is spliced into the SQL text as a literal before it's sent.
+     */
+    public function test_substitute_handles_placeholder_nested_in_call_argument_subquery(): void
+    {
+        $sql = PlaceholderTranslator::substitute(
+            "call setquestanswer(?, ?, null, (select site.sitepin from site where site.siteid=?), ?)",
+            ["'S'", "'STM'", '1', "'x'"],
+        );
+
+        self::assertSame(
+            "call setquestanswer('S', 'STM', null, (select site.sitepin from site where site.siteid=1), 'x')",
+            $sql,
+        );
+    }
 }

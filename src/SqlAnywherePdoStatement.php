@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace EmerickLaw\SqlAnywherePdo;
 
 use EmerickLaw\SqlAnywherePdo\Internal\ErrorInfo;
+use EmerickLaw\SqlAnywherePdo\Internal\PlaceholderTranslator;
 use EmerickLaw\SqlAnywherePdo\Internal\TypeMapper;
 use PDO;
 use PDOStatement;
@@ -89,6 +90,22 @@ class SqlAnywherePdoStatement extends PDOStatement
     private readonly bool $isWriteStatement;
 
     /**
+     * True for a statement prepared under PDO::ATTR_EMULATE_PREPARES (the
+     * default — see SqlAnywherePdo::prepare()). $stmt is always null in
+     * this mode: there's no native sasql_prepare() statement at all, since
+     * bound values are spliced into $sql as literals at execute() time
+     * instead of sent as host variables. Everywhere else in this class
+     * that needs to tell "native prepared statement" apart from "result
+     * from a plain query" branches on `$this->stmt !== null`, which is
+     * false for both a query()-built statement AND an emulated one — both
+     * fetch off $this->result via the sasql_* (non-stmt) functions.
+     */
+    private readonly bool $emulated;
+
+    /** Raw, untranslated SQL as passed to prepare() — needed by executeEmulated() to re-run PlaceholderTranslator::substitute() once bound values are known. */
+    private readonly ?string $sql;
+
+    /**
      * @param list<string|int> $paramOrder
      * @param resource|null $result
      * @param resource|null $stmt
@@ -99,10 +116,13 @@ class SqlAnywherePdoStatement extends PDOStatement
         mixed $stmt = null,
         array $paramOrder = [],
         ?string $sql = null,
+        bool $emulated = false,
     ) {
         $this->result = $result;
         $this->stmt = $stmt;
-        $this->isPrepared = $stmt !== null;
+        $this->isPrepared = $stmt !== null || $emulated;
+        $this->emulated = $emulated;
+        $this->sql = $sql;
         $this->paramOrder = $paramOrder;
         $this->fetchMode = $pdo->getDefaultFetchMode();
         $this->isWriteStatement = self::sqlIsWriteStatement($sql);
@@ -140,8 +160,9 @@ class SqlAnywherePdoStatement extends PDOStatement
 
     public function bindColumn(string|int $column, mixed &$var, int $type = PDO::PARAM_STR, int $maxLength = 0, mixed $driverOptions = null): bool
     {
-        if (!$this->isPrepared) {
-            // No stmt_bind_result equivalent exists for the non-prepared path.
+        if ($this->stmt === null) {
+            // No stmt_bind_result equivalent exists for the non-native-stmt
+            // (query()-built or emulated-prepare) path.
             return false;
         }
 
@@ -171,6 +192,10 @@ class SqlAnywherePdoStatement extends PDOStatement
             foreach ($params as $key => $value) {
                 $this->bindValue($isList ? $key + 1 : $key, $value, TypeMapper::inferParamType($value));
             }
+        }
+
+        if ($this->emulated) {
+            return $this->executeEmulated();
         }
 
         $this->bindBufferedParamsToStatement();
@@ -209,11 +234,54 @@ class SqlAnywherePdoStatement extends PDOStatement
         return true;
     }
 
+    /**
+     * Emulated-prepare execute path (the default — see SqlAnywherePdo::prepare()
+     * and this class's $emulated doc comment). Splices bound values into
+     * $sql as literals via PlaceholderTranslator::substitute() and runs
+     * the result through sasql_query(), same as PDO::query()/exec() —
+     * never sasql_prepare()/sasql_stmt_bind_param(). No host variables
+     * reach SQL Anywhere at all, so its CALL-argument/subquery
+     * host-variable parsing limitation never comes into play.
+     */
+    private function executeEmulated(): bool
+    {
+        $count = count($this->paramOrder);
+        $literals = [];
+
+        for ($slot = 0; $slot < $count; $slot++) {
+            if (!array_key_exists($slot, $this->boundParams)) {
+                throw new SqlAnywherePdoException(sprintf('SQLSTATE[HY093]: Invalid parameter number: parameter %d was not bound', $slot + 1));
+            }
+
+            $bound = $this->boundParams[$slot];
+            $value = $bound['isRef'] ? $bound['ref'] : $bound['value'];
+
+            $literals[$slot] = TypeMapper::toLiteral($bound['type'], $value, fn (string $s): string => $this->pdo->escapeString($s));
+        }
+
+        $sql = PlaceholderTranslator::substitute($this->sql ?? '', $literals);
+
+        $result = @sasql_query($this->pdo->getConnectionResource(), $sql);
+
+        if ($result === false) {
+            return $this->pdo->fail($this->pdo->connectionErrorInfo());
+        }
+
+        $this->result = $result;
+        $this->resultMetadataResource = null;
+        $this->preparedResultBound = false;
+        $this->hasPrefetchedRow = false;
+        $this->fetchBuffer = [];
+        $this->externalColumnBindings = [];
+
+        return true;
+    }
+
     public function fetch(int $mode = PDO::FETCH_DEFAULT, int $cursorOrientation = PDO::FETCH_ORI_NEXT, int $cursorOffset = 0): mixed
     {
         $mode = $mode === PDO::FETCH_DEFAULT ? $this->fetchMode : $mode;
 
-        if ($this->isPrepared) {
+        if ($this->stmt !== null) {
             $row = $this->fetchPreparedRow();
 
             if ($row === null) {
@@ -302,7 +370,7 @@ class SqlAnywherePdoStatement extends PDOStatement
 
     public function rowCount(): int
     {
-        if ($this->isPrepared) {
+        if ($this->stmt !== null) {
             return (int) @sasql_stmt_affected_rows($this->stmt);
         }
 
@@ -313,7 +381,7 @@ class SqlAnywherePdoStatement extends PDOStatement
 
     public function columnCount(): int
     {
-        if ($this->isPrepared) {
+        if ($this->stmt !== null) {
             return (int) @sasql_stmt_field_count($this->stmt);
         }
 
@@ -324,7 +392,7 @@ class SqlAnywherePdoStatement extends PDOStatement
 
     public function closeCursor(): bool
     {
-        if ($this->isPrepared) {
+        if ($this->stmt !== null) {
             @sasql_stmt_free_result($this->stmt);
         } elseif (is_resource($this->result)) {
             // sasql_query() returns bool(true), not a resource, for
@@ -372,7 +440,7 @@ class SqlAnywherePdoStatement extends PDOStatement
 
     public function getColumnMeta(int $column): array|false
     {
-        $names = $this->isPrepared ? $this->resolveColumnNames() : $this->resolveNonPreparedColumnNames();
+        $names = $this->stmt !== null ? $this->resolveColumnNames() : $this->resolveNonPreparedColumnNames();
 
         if (!array_key_exists($column, $names)) {
             return false;
@@ -383,7 +451,7 @@ class SqlAnywherePdoStatement extends PDOStatement
 
     public function nextRowset(): bool
     {
-        if ($this->isPrepared) {
+        if ($this->stmt !== null) {
             return @sasql_stmt_next_result($this->stmt) !== false;
         }
 
@@ -409,7 +477,7 @@ class SqlAnywherePdoStatement extends PDOStatement
         // it after the stmt has already been closed out from under it.
         $this->resultMetadataResource = null;
 
-        if ($this->isPrepared && isset($this->stmt) && is_resource($this->stmt)) {
+        if (isset($this->stmt) && is_resource($this->stmt)) {
             @sasql_stmt_close($this->stmt);
         } elseif (isset($this->result) && is_resource($this->result)) {
             @sasql_free_result($this->result);
@@ -703,7 +771,7 @@ class SqlAnywherePdoStatement extends PDOStatement
 
     private function statementErrorInfo(): ErrorInfo
     {
-        if (!$this->isPrepared) {
+        if ($this->stmt === null) {
             return $this->pdo->connectionErrorInfo();
         }
 

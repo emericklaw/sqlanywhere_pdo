@@ -24,6 +24,22 @@ class SqlAnywherePdo extends PDO
 
     private int $errorMode = PDO::ERRMODE_EXCEPTION;
 
+    /**
+     * Defaults to true, matching every other PDO driver's own default.
+     * With emulation on, prepare() never calls sasql_prepare() — bound
+     * values are spliced into the SQL text as literals at execute() time
+     * (see SqlAnywherePdoStatement::executeEmulated()) instead of being
+     * sent to SQL Anywhere as host variables. This sidesteps a SQL Anywhere
+     * parser limitation where a '?'/named placeholder nested inside a
+     * subquery that's itself an argument to a CALL procedure(...) isn't
+     * recognized as a bindable host variable, producing a misleading
+     * "Not enough values for host variables" error even though every
+     * placeholder textually present was bound. Real bound host-variable
+     * prepares are still available by passing PDO::ATTR_EMULATE_PREPARES
+     * => false, needed e.g. for streaming PARAM_LOB values.
+     */
+    private bool $emulatePrepares = true;
+
     private int $defaultFetchMode = PDO::FETCH_BOTH;
 
     private bool $inTransaction = false;
@@ -86,14 +102,19 @@ class SqlAnywherePdo extends PDO
     public function prepare(string $query, array $options = []): SqlAnywherePdoStatement|false
     {
         $translated = PlaceholderTranslator::translate($query);
+        $emulate = (bool) ($options[PDO::ATTR_EMULATE_PREPARES] ?? $this->emulatePrepares);
 
-        $stmt = @sasql_prepare($this->conn, $translated->sql);
+        if (!$emulate) {
+            $stmt = @sasql_prepare($this->conn, $translated->sql);
 
-        if ($stmt === false) {
-            return $this->fail($this->connectionErrorInfo());
+            if ($stmt === false) {
+                return $this->fail($this->connectionErrorInfo());
+            }
+
+            return new SqlAnywherePdoStatement($this, stmt: $stmt, paramOrder: $translated->paramOrder, sql: $query);
         }
 
-        return new SqlAnywherePdoStatement($this, stmt: $stmt, paramOrder: $translated->paramOrder, sql: $query);
+        return new SqlAnywherePdoStatement($this, paramOrder: $translated->paramOrder, sql: $query, emulated: true);
     }
 
     public function exec(string $statement): int|false
@@ -211,6 +232,25 @@ class SqlAnywherePdo extends PDO
         return "'" . $escaped . "'";
     }
 
+    /**
+     * @internal used by SqlAnywherePdoStatement's emulated-prepare path
+     * (TypeMapper::toLiteral()) to escape a bound string value before
+     * splicing it into the SQL text as a literal. Throws rather than
+     * silently falling back to an unescaped value on failure — this feeds
+     * directly into a SQL string, so a silent fallback would be a SQL
+     * injection hazard.
+     */
+    public function escapeString(string $value): string
+    {
+        $escaped = @sasql_real_escape_string($this->conn, $value);
+
+        if ($escaped === false) {
+            throw new SqlAnywherePdoException('Unable to escape string value for emulated prepare.');
+        }
+
+        return $escaped;
+    }
+
     public function getAttribute(int $attribute): mixed
     {
         return match ($attribute) {
@@ -219,6 +259,7 @@ class SqlAnywherePdo extends PDO
             PDO::ATTR_DEFAULT_FETCH_MODE => $this->defaultFetchMode,
             PDO::ATTR_AUTOCOMMIT => !$this->inTransaction,
             PDO::ATTR_PERSISTENT => $this->isPersistent,
+            PDO::ATTR_EMULATE_PREPARES => $this->emulatePrepares,
             default => $this->attributes[$attribute] ?? null,
         };
     }
@@ -246,6 +287,10 @@ class SqlAnywherePdo extends PDO
                 return true;
             case PDO::ATTR_AUTOCOMMIT:
                 @sasql_set_option($this->conn, 'auto_commit', $value ? 'on' : 'off');
+
+                return true;
+            case PDO::ATTR_EMULATE_PREPARES:
+                $this->emulatePrepares = (bool) $value;
 
                 return true;
             default:

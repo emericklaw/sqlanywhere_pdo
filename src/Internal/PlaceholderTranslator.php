@@ -14,10 +14,57 @@ use EmerickLaw\SqlAnywherePdo\SqlAnywherePdoException;
  * comments so a literal '?' or ':' inside them is never mistaken for a
  * placeholder) and rewrites every placeholder to '?', recording the order
  * so bindParam()/execute() can resolve back to the right positional slot.
+ *
+ * substitute() reuses the same tokenizer to splice literal values directly
+ * into the SQL text instead (emulated prepares — see SqlAnywherePdo::prepare()),
+ * so the two never drift out of sync on how a placeholder is recognized.
  */
 final class PlaceholderTranslator
 {
     public static function translate(string $sql): TranslatedQuery
+    {
+        [$out, $paramOrder, $sawNamed, $sawAnonymous] = self::walk(
+            $sql,
+            static fn (int $slot, ?string $name): string => '?',
+        );
+
+        if ($sawNamed && $sawAnonymous) {
+            throw SqlAnywherePdoException::fromErrorInfo([
+                'HY093',
+                null,
+                'Mixed named and positional placeholders are not supported in a single statement.',
+            ]);
+        }
+
+        return new TranslatedQuery($out, $paramOrder);
+    }
+
+    /**
+     * Replaces every placeholder in $sql (in the same left-to-right order
+     * used by translate(), so slot N here always matches paramOrder[N])
+     * with the literal text in $literals[N] — already fully quoted/escaped
+     * by the caller. Used for emulated prepares, where bound values are
+     * spliced into the SQL text itself rather than sent as host variables.
+     *
+     * @param list<string> $literals
+     */
+    public static function substitute(string $sql, array $literals): string
+    {
+        [$out] = self::walk($sql, static function (int $slot, ?string $name) use ($literals): string {
+            if (!array_key_exists($slot, $literals)) {
+                throw new SqlAnywherePdoException(sprintf('SQLSTATE[HY093]: Invalid parameter number: parameter %d was not bound', $slot + 1));
+            }
+
+            return $literals[$slot];
+        });
+
+        return $out;
+    }
+
+    /**
+     * @return array{0: string, 1: list<string|int>, 2: bool, 3: bool} [sql, paramOrder, sawNamed, sawAnonymous]
+     */
+    private static function walk(string $sql, \Closure $onPlaceholder): array
     {
         $length = strlen($sql);
         $out = '';
@@ -25,6 +72,7 @@ final class PlaceholderTranslator
         $sawNamed = false;
         $sawAnonymous = false;
         $anonymousIndex = 0;
+        $slot = 0;
 
         $i = 0;
         while ($i < $length) {
@@ -111,9 +159,9 @@ final class PlaceholderTranslator
 
             // Anonymous placeholder.
             if ($char === '?') {
-                $out .= '?';
                 $paramOrder[] = $anonymousIndex++;
                 $sawAnonymous = true;
+                $out .= $onPlaceholder($slot++, null);
                 $i++;
                 continue;
             }
@@ -125,9 +173,9 @@ final class PlaceholderTranslator
                     $j++;
                 }
                 $name = strtolower(substr($sql, $i + 1, $j - $i - 1));
-                $out .= '?';
                 $paramOrder[] = $name;
                 $sawNamed = true;
+                $out .= $onPlaceholder($slot++, $name);
                 $i = $j;
                 continue;
             }
@@ -136,15 +184,7 @@ final class PlaceholderTranslator
             $i++;
         }
 
-        if ($sawNamed && $sawAnonymous) {
-            throw SqlAnywherePdoException::fromErrorInfo([
-                'HY093',
-                null,
-                'Mixed named and positional placeholders are not supported in a single statement.',
-            ]);
-        }
-
-        return new TranslatedQuery($out, $paramOrder);
+        return [$out, $paramOrder, $sawNamed, $sawAnonymous];
     }
 
     private static function isIdentifierStart(string $char): bool
