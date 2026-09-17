@@ -201,7 +201,7 @@ class SqlAnywherePdoStatement extends PDOStatement
         $this->bindBufferedParamsToStatement();
         $this->sendLongDataForLobParams();
 
-        if (@sasql_stmt_execute($this->stmt) === false) {
+        if ($this->pdo->withBlockedSignals(fn () => @sasql_stmt_execute($this->stmt)) === false) {
             return $this->pdo->fail($this->statementErrorInfo());
         }
 
@@ -261,7 +261,7 @@ class SqlAnywherePdoStatement extends PDOStatement
 
         $sql = PlaceholderTranslator::substitute($this->sql ?? '', $literals);
 
-        $result = @sasql_query($this->pdo->getConnectionResource(), $sql);
+        $result = $this->pdo->withBlockedSignals(fn () => @sasql_query($this->pdo->getConnectionResource(), $sql));
 
         if ($result === false) {
             return $this->pdo->fail($this->pdo->connectionErrorInfo());
@@ -292,17 +292,24 @@ class SqlAnywherePdoStatement extends PDOStatement
         }
 
         if ($mode === PDO::FETCH_CLASS) {
-            $assoc = @sasql_fetch_assoc($this->result);
+            $assoc = $this->pdo->withBlockedSignals(fn () => @sasql_fetch_assoc($this->result));
 
             return $assoc === false ? false : $this->hydrateClass($assoc, $this->fetchModeArgs);
         }
 
-        return match ($mode) {
+        $row = $this->pdo->withBlockedSignals(fn () => match ($mode) {
             PDO::FETCH_ASSOC => @sasql_fetch_assoc($this->result),
             PDO::FETCH_NUM => @sasql_fetch_row($this->result),
             PDO::FETCH_OBJ => @sasql_fetch_object($this->result),
             default => @sasql_fetch_array($this->result, SASQL_BOTH),
-        };
+        });
+
+        // sasql_fetch_*() isn't guaranteed to return a strict `false` at
+        // end-of-result/on error (e.g. NULL on some builds) — fetchAll()'s
+        // `while (($row = $this->fetch(...)) !== false)` loop never
+        // terminates otherwise, spinning forever with no further DB
+        // activity. Normalize anything that isn't an actual row to false.
+        return is_array($row) || is_object($row) ? $row : false;
     }
 
     public function fetchAll(int $mode = PDO::FETCH_DEFAULT, mixed ...$args): array
@@ -618,7 +625,7 @@ class SqlAnywherePdoStatement extends PDOStatement
             // TOP-limited statements. The buffer is already bound above,
             // so this fetch populates it; fetchPreparedRow() returns this
             // buffered row on its first call instead of fetching again.
-            $this->hasPrefetchedRow = (bool) @sasql_stmt_fetch($this->stmt);
+            $this->hasPrefetchedRow = (bool) $this->pdo->withBlockedSignals(fn () => @sasql_stmt_fetch($this->stmt));
         }
 
         // Kept on $this (not a local var) — letting this resource's
@@ -691,7 +698,7 @@ class SqlAnywherePdoStatement extends PDOStatement
         if ($this->hasPrefetchedRow) {
             $this->hasPrefetchedRow = false;
         } else {
-            $fetched = @sasql_stmt_fetch($this->stmt);
+            $fetched = $this->pdo->withBlockedSignals(fn () => @sasql_stmt_fetch($this->stmt));
 
             if ($fetched === false || $fetched === null) {
                 return null;

@@ -58,9 +58,9 @@ class SqlAnywherePdo extends PDO
         $connectionString = ConnectionStringBuilder::build($dsn, $username, $password);
         $this->isPersistent = (bool) ($options[PDO::ATTR_PERSISTENT] ?? false);
 
-        $conn = $this->isPersistent
+        $conn = $this->withBlockedSignals(fn () => $this->isPersistent
             ? @sasql_pconnect($connectionString)
-            : @sasql_connect($connectionString);
+            : @sasql_connect($connectionString));
 
         if ($conn === false) {
             // No connection resource exists yet, so the per-connection
@@ -84,7 +84,7 @@ class SqlAnywherePdo extends PDO
 
     public function query(string $query, ?int $fetchMode = null, mixed ...$fetchModeArgs): SqlAnywherePdoStatement|false
     {
-        $result = @sasql_query($this->conn, $query);
+        $result = $this->withBlockedSignals(fn () => @sasql_query($this->conn, $query));
 
         if ($result === false) {
             return $this->fail($this->connectionErrorInfo());
@@ -119,7 +119,7 @@ class SqlAnywherePdo extends PDO
 
     public function exec(string $statement): int|false
     {
-        $result = @sasql_query($this->conn, $statement);
+        $result = $this->withBlockedSignals(fn () => @sasql_query($this->conn, $statement));
 
         if ($result === false) {
             return $this->fail($this->connectionErrorInfo());
@@ -361,5 +361,39 @@ class SqlAnywherePdo extends PDO
         if (!$this->isPersistent && isset($this->conn) && is_resource($this->conn)) {
             @sasql_close($this->conn);
         }
+    }
+
+    /**
+     * @internal shared with SqlAnywherePdoStatement — every blocking sasql_*
+     * call (connect/query/prepare/execute/fetch) must run through this.
+     * A queue worker's job-timeout kill is delivered via SIGALRM to THIS
+     * SAME process (Illuminate\Queue\Worker::runJob() uses pcntl_alarm(),
+     * not an external watchdog). ext-sqlanywhere's underlying client
+     * library is closed-source and not documented as signal-safe/reentrant;
+     * a SIGALRM landing mid-syscall inside it can leave its process-global
+     * state corrupted for the rest of the worker's life, hanging every
+     * later job on that same long-lived worker (queue:work/Horizon reuse
+     * one process across many jobs — queue:listen forks fresh per job and
+     * never observes this). Blocking the signal defers its delivery until
+     * the call returns, where PHP can handle it safely between opcodes.
+     */
+    public function withBlockedSignals(\Closure $fn): mixed
+    {
+        if (!self::pcntlAvailable()) {
+            return $fn();
+        }
+
+        pcntl_sigprocmask(SIG_BLOCK, [SIGALRM], $previousMask);
+
+        try {
+            return $fn();
+        } finally {
+            pcntl_sigprocmask(SIG_SETMASK, $previousMask);
+        }
+    }
+
+    private static function pcntlAvailable(): bool
+    {
+        return extension_loaded('pcntl') && function_exists('pcntl_sigprocmask');
     }
 }
